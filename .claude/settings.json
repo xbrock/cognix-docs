@@ -1,0 +1,5 @@
+{
+  "enabledPlugins": {
+    "cognix-workflow@cognix-workflow": true
+  }
+}
