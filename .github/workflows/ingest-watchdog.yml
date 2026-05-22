@@ -1,0 +1,291 @@
+name: Ingest freshness watchdog
+
+# Site-health automation (GTM-S12) — ingest-freshness watchdog for cli-docs.
+#
+# The hourly `ingest-cli-docs.yml` workflow pulls a `cli-docs` release asset
+# from the cognix Core repo. This watchdog does NOT run or re-implement that
+# ingest; it only *monitors* it. If the Core repo has published a release that
+# the ingest has not picked up, and that release is old enough to mean the
+# ingest is genuinely stuck, this opens a tracking issue.
+#
+# Crucially, the ingest only acts on releases that carry an ingestable
+# `cli-docs` asset — a release with no such asset is a correct no-op for the
+# ingest, NOT a stale ingest. This watchdog therefore mirrors the ingest's
+# asset matcher and only flags a release as stale if it actually carries an
+# ingestable cli-docs asset. Without that check a cli-docs-less release
+# (e.g. cognix-dev/cognix v0.2.6, whose docsgen pipeline ships separately)
+# would trip a permanent false alarm.
+#
+# Reads are credential-free (public GitHub Releases API). The only token used
+# is the built-in GITHUB_TOKEN, and only to open/inspect issues in this repo.
+#
+# A missing Core repo (404), a fresh ingest, or a release younger than the
+# 24h threshold is expected during GTM bring-up — those are clean success
+# no-ops with no issue opened. The ingest runs hourly, so 24h is a generous
+# failure signal, not a latency target.
+
+on:
+  schedule:
+    # Daily — 24h staleness only needs a once-a-day check.
+    - cron: '47 6 * * *'
+  workflow_dispatch:
+    inputs:
+      fixture_stale:
+        description: >-
+          Synthetic-fixture mode: evaluate against an artificially old recorded
+          state so the issue-opening path fires on demand. Leave false for a
+          real check against .github/ingest-state/cli-docs-last-release.json.
+        type: boolean
+        default: false
+
+# Default GITHUB_TOKEN is read-only; opening issues needs write.
+permissions:
+  contents: read
+  issues: write
+
+# A watchdog run never mutates shared state, but serialise anyway so two runs
+# cannot both decide to open the same issue before either has created it.
+concurrency:
+  group: ingest-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+
+    env:
+      # Recorded-state file written by the ingest workflow.
+      STATE_FILE: .github/ingest-state/cli-docs-last-release.json
+      # Releases older than this (in hours) that remain un-ingested are stale.
+      STALE_THRESHOLD_HOURS: '24'
+      # Marker label on watchdog-opened issues — used for duplicate detection.
+      MARKER_LABEL: ingest-stale
+      # The cognix Core repo — the only source of the CLI reference. The CLI
+      # surface is Core-only, so cognix-desktop is intentionally NOT polled.
+      SOURCE_REPO: cognix-dev/cognix
+      # Synthetic-fixture toggle. workflow_dispatch passes a real boolean;
+      # scheduled runs leave it empty, which evaluates as false below.
+      FIXTURE_STALE: ${{ inputs.fixture_stale }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect stale un-ingested cli-docs release
+        id: detect
+        run: |
+          set -euo pipefail
+
+          # --- Resolve the recorded state to evaluate against ---
+          # Real mode: the on-disk state file the ingest workflow maintains.
+          # Fixture mode: a synthetic state with an artificially old tag and
+          # timestamp, so a stale condition exists even though the real ingest
+          # is healthy. This keeps scheduled runs honest while making the
+          # issue-opening path testable on demand.
+          #
+          # Because the staleness verdict now also requires the release to
+          # carry an ingestable `cli-docs` asset (mirroring the ingest), the
+          # fixture must additionally supply a synthetic release body for the
+          # Core repo — one that is BOTH un-ingested/old AND carries a
+          # `cli-docs` asset — otherwise the fixture would correctly no-op
+          # post-fix and never exercise the issue-opening path.
+          state_file="$STATE_FILE"
+          fixture_release_file=""
+          if [ "${FIXTURE_STALE:-false}" = "true" ]; then
+            echo "Fixture mode: evaluating against a synthetic stale state."
+            state_file="$(mktemp)"
+            old_ts="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+            jq -n --arg r "$SOURCE_REPO" --arg ts "$old_ts" '{
+              repos: {
+                ($r): {
+                  last_release_tag: "v0.0.0-fixture-stale",
+                  last_ingested_at: $ts
+                }
+              }
+            }' > "$state_file"
+
+            # Synthetic release body for the Core repo: an old, un-ingested
+            # tag that DOES carry a `cli-docs` asset, so the asset-aware
+            # staleness check still reaches the issue-opening path.
+            fixture_release_file="$(mktemp)"
+            jq -n --arg ts "$old_ts" '{
+              tag_name: "v9.9.9-fixture-stale",
+              published_at: $ts,
+              assets: [
+                {
+                  name: "cli-docs",
+                  browser_download_url: "https://example.invalid/cli-docs"
+                }
+              ]
+            }' > "$fixture_release_file"
+          else
+            echo "Real mode: evaluating against $STATE_FILE."
+          fi
+
+          now_epoch="$(date -u +%s)"
+          threshold_secs=$(( STALE_THRESHOLD_HOURS * 3600 ))
+
+          stale_repo=""
+          stale_tag=""
+          stale_recorded_tag=""
+          stale_published=""
+          stale_age_hours=""
+
+          echo "::group::$SOURCE_REPO"
+
+          body_file="$(mktemp)"
+          if [ -n "$fixture_release_file" ]; then
+            # Fixture mode: use the synthetic release body so the asset-aware
+            # staleness path is exercised without depending on a real release.
+            echo "Fixture mode: using synthetic release body for $SOURCE_REPO."
+            cp "$fixture_release_file" "$body_file"
+            status="200"
+          else
+            # --- Credential-free read of the public Releases API ---
+            # No Authorization header. -w captures the HTTP status so a
+            # missing repo (404) or empty release set is a skip, never a
+            # failure.
+            status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${SOURCE_REPO}/releases/latest" || echo 000)"
+          fi
+
+          if [ "$status" != "200" ]; then
+            # 404 = repo or releases do not exist yet; anything else =
+            # transient. Either way: expected during GTM bring-up — skip.
+            echo "No usable latest release (HTTP $status) — skipping $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_tag="$(jq -r '.tag_name // empty' "$body_file")"
+          published_at="$(jq -r '.published_at // empty' "$body_file")"
+          if [ -z "$latest_tag" ] || [ -z "$published_at" ]; then
+            echo "Latest release missing tag or publish date — skipping $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          recorded_tag="$(jq -r --arg r "$SOURCE_REPO" \
+            '.repos[$r].last_release_tag // empty' "$state_file")"
+
+          if [ "$latest_tag" = "$recorded_tag" ]; then
+            echo "Ingest is current at $latest_tag — fresh for $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A newer tag exists, but the ingest only acts on releases that
+          # carry an ingestable `cli-docs` asset. Mirror the ingest's asset
+          # matcher (`cli-docs` / `cli-docs.tar.gz` / `cli-docs.tgz` /
+          # `cli-docs.zip`): a release with no such asset is a CORRECT ingest
+          # no-op, not a stale ingest. Skip it — flagging it would be a false
+          # alarm.
+          asset_url="$(jq -r '
+            .assets[]?
+            | select(.name == "cli-docs" or .name == "cli-docs.tar.gz"
+                     or .name == "cli-docs.tgz" or .name == "cli-docs.zip")
+            | .browser_download_url' "$body_file" | head -n1)"
+
+          if [ -z "$asset_url" ]; then
+            echo "Release $latest_tag has no ingestable cli-docs asset — the ingest correctly no-ops, not stale for $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A newer release with an ingestable asset exists. Stale only if it
+          # has been published longer than the threshold — a release younger
+          # than 24h is still within the ingest's normal catch-up window.
+          published_epoch="$(date -u -d "$published_at" +%s)"
+          age_secs=$(( now_epoch - published_epoch ))
+          age_hours=$(( age_secs / 3600 ))
+
+          if [ "$age_secs" -lt "$threshold_secs" ]; then
+            echo "Newer release $latest_tag is only ${age_hours}h old (< ${STALE_THRESHOLD_HOURS}h) — not stale yet."
+            echo "::endgroup::"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "STALE: $SOURCE_REPO released $latest_tag ${age_hours}h ago; ingest still records '${recorded_tag:-none}'."
+          stale_repo="$SOURCE_REPO"
+          stale_tag="$latest_tag"
+          stale_recorded_tag="${recorded_tag:-none}"
+          stale_published="$published_at"
+          stale_age_hours="$age_hours"
+          echo "::endgroup::"
+
+          {
+            echo "stale=true"
+            echo "repo=$stale_repo"
+            echo "tag=$stale_tag"
+            echo "recorded_tag=$stale_recorded_tag"
+            echo "published=$stale_published"
+            echo "age_hours=$stale_age_hours"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update stale-ingest issue
+        if: steps.detect.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_SLUG: ${{ steps.detect.outputs.repo }}
+          LATEST_TAG: ${{ steps.detect.outputs.tag }}
+          RECORDED_TAG: ${{ steps.detect.outputs.recorded_tag }}
+          PUBLISHED: ${{ steps.detect.outputs.published }}
+          AGE_HOURS: ${{ steps.detect.outputs.age_hours }}
+        run: |
+          set -euo pipefail
+
+          ISSUE_TITLE="cli-docs ingest is stale: ${REPO_SLUG} ${LATEST_TAG} un-ingested"
+
+          # Ensure the marker label exists (idempotent — ignore "already exists").
+          gh label create "$MARKER_LABEL" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color B60205 \
+            --description 'Watchdog: a cli-docs release has gone un-ingested' \
+            2>/dev/null || true
+
+          # Duplicate guard: if an open issue already carries the marker label,
+          # do not open another. Comment on it instead so the alert stays live.
+          existing="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label "$MARKER_LABEL" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          BODY="$(cat <<EOF
+          The ingest-freshness watchdog detected a cli-docs release that the
+          ingest has not picked up.
+
+          - **Source repo:** \`${REPO_SLUG}\`
+          - **Latest published release:** \`${LATEST_TAG}\`
+          - **Published at:** ${PUBLISHED}
+          - **Recorded (ingested) tag:** \`${RECORDED_TAG}\`
+          - **Un-ingested for:** ~${AGE_HOURS}h (threshold: ${STALE_THRESHOLD_HOURS}h)
+
+          The hourly \`ingest-cli-docs.yml\` workflow should have ingested this
+          release. Check that workflow's recent runs for failures, then re-run
+          it. This issue was opened automatically by \`ingest-watchdog.yml\`.
+          EOF
+          )"
+
+          if [ -n "$existing" ]; then
+            echo "Open stale-ingest issue #$existing already exists — updating it."
+            gh issue comment "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$BODY"
+          else
+            echo "No open stale-ingest issue — opening one."
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$ISSUE_TITLE" \
+              --label "$MARKER_LABEL" \
+              --body "$BODY"
+          fi
