@@ -36,7 +36,7 @@ answering a structural question, before scaffolding anything.
 **Do NOT re-decide the locked design.** The 9-section IA, the themed-not-forked
 brand approach, the CLI-reference file-drop contract, the narrative content
 model, and unversioned-at-v1 are all locked in `references/docs-domain.md`
-(KMCP `7b330fd0`, GTM-build campaign thread C). Encode them; never re-derive
+(KMCP `7b330fd0-b8f8-461b-bd70-c67b3fbbea4a`, GTM-build campaign thread C). Encode them; never re-derive
 them. If reality contradicts the design, surface the contradiction — do not
 patch the design to fit.
 
@@ -354,7 +354,7 @@ the inventory; the reference file is the single source.
 
 ## Knowledge integration
 
-This skill encodes KMCP entry `7b330fd0` (Cognix Docs Site Build, GTM-build
+This skill encodes KMCP entry `7b330fd0-b8f8-461b-bd70-c67b3fbbea4a` (Cognix Docs Site Build, GTM-build
 campaign thread C) — the locked design. It does not query or write KMCP at
 runtime; the locked design is mirrored into `references/docs-domain.md`. If the
 design changes, the change flows through a thread-C re-open and KMCP update,

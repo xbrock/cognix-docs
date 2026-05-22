@@ -6,11 +6,21 @@ single source for the locked v1 docs design: the 9-section information
 architecture, the generated CLI-reference contract, the narrative content
 model, the API-reference scope, and theming / search / versioning.
 
-It mirrors KMCP entry `7b330fd0` (Cognix Docs Site Build, GTM-build campaign
+It mirrors KMCP entry `7b330fd0-b8f8-461b-bd70-c67b3fbbea4a` (Cognix Docs Site Build, GTM-build campaign
 thread C, locked 2026-05-22). **Everything here is locked.** Encode it; do not
 re-derive it. If reality contradicts the design, surface the contradiction —
 do not patch the design to fit. Design doc:
 `docs/cognix/specs/2026-05-22-gtm-build-campaign/docs-site-build/design.md`.
+
+## Contents
+
+- [1. The 9-section IA → Starlight structure](#1-the-9-section-ia--starlight-structure)
+- [2. CLI Reference — generated-content contract](#2-cli-reference--generated-content-contract)
+- [3. Narrative content model](#3-narrative-content-model)
+- [4. API Reference (section 8)](#4-api-reference-section-8)
+- [5. Theming, search, versioning](#5-theming-search-versioning)
+- [Build sequencing (context)](#build-sequencing-context)
+- [Cross-thread relationships](#cross-thread-relationships)
 
 ## 1. The 9-section IA → Starlight structure
 
