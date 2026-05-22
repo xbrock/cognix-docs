@@ -1,0 +1,132 @@
+name: External link-check
+
+# Scheduled outbound/external broken-link crawl.
+#
+# This COMPLEMENTS the PR-gate CI (ci.yml), which runs lychee --offline over
+# the built site to catch broken *internal/relative* links deterministically.
+# That gate deliberately never touches the network. This workflow is the other
+# half: it crawls the same built output but checks *external* URLs — links to
+# GitHub, docs, social, etc. — which rot independently of any code change and
+# so need a time-based cron rather than a per-PR gate.
+#
+# A clean crawl is a success no-op (no issue). Broken external links open a
+# single GitHub issue in this repo, deduplicated via a marker label so a
+# recurring failure comments on the existing issue instead of stacking new
+# ones. The docs skeleton currently has very few outbound links, so
+# failIfEmpty is false — an empty crawl is a healthy no-op.
+
+on:
+  schedule:
+    # Weekly — Monday 06:00 UTC. External-link rot is slow; weekly is plenty.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# gh issue create/comment needs write to open/comment on issues. Build only
+# reads the repo.
+permissions:
+  contents: read
+  issues: write
+
+# Never let two link-check runs race on issue creation.
+concurrency:
+  group: link-check
+  cancel-in-progress: false
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: External link-check
+        id: lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Crawl the built static site. Unlike the CI internal check this runs
+          # online and restricts checks to http/https URLs via --scheme, so it
+          # reports only outbound/external breakage (relative/internal links
+          # are already gated in CI). mailto: links are skipped — lychee does
+          # not check mail addresses unless --include-mail is passed.
+          args: >-
+            --no-progress
+            --exclude-path dist
+            --scheme https
+            --scheme http
+            './dist/**/*.html'
+          # Emit a markdown report instead of failing the step, so the
+          # issue-creation step below can run and own the failure signal.
+          fail: false
+          # A crawl that finds zero external links is a healthy no-op, not a
+          # failure — do not let the action exit nonzero on an empty result.
+          # The docs skeleton currently has few outbound links so this matters.
+          failIfEmpty: false
+          output: ./lychee/out.md
+          format: markdown
+
+      - name: Open / update broken-link issue
+        if: steps.lychee.outputs.exit_code != 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          MARKER_LABEL='link-check'
+          ISSUE_TITLE='Broken external links detected'
+
+          # Ensure labels exist (idempotent — ignore "already exists").
+          gh label create "$MARKER_LABEL" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color B60205 \
+            --description 'Link-check: broken external links detected' \
+            2>/dev/null || true
+          gh label create automated \
+            --repo "$GITHUB_REPOSITORY" \
+            --color ededed \
+            --description 'Opened automatically by a workflow' \
+            2>/dev/null || true
+
+          # Duplicate guard: peter-evans/create-issue-from-file does NOT dedup
+          # by label — it only updates an issue given an explicit issue-number.
+          # So resolve any open issue carrying the marker label ourselves and
+          # comment on it; only open a fresh issue when none exists. This is
+          # the same correct dedup pattern ingest-watchdog.yml uses.
+          existing="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label "$MARKER_LABEL" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            echo "Open broken-link issue #$existing already exists — updating it."
+            gh issue comment "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file ./lychee/out.md
+          else
+            echo "No open broken-link issue — opening one."
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$ISSUE_TITLE" \
+              --label "$MARKER_LABEL" \
+              --label automated \
+              --body-file ./lychee/out.md
+          fi
+
+      - name: Report clean crawl
+        if: steps.lychee.outputs.exit_code == 0
+        run: echo 'All external links healthy — no issue opened.'

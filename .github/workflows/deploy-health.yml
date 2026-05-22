@@ -1,0 +1,160 @@
+name: Deploy health
+
+# Scheduled Cloudflare Pages deploy-health check.
+#
+# Cloudflare Pages builds this site on every push to main. A failed Pages
+# build is invisible from inside GitHub Actions — nothing here turns red — so
+# this workflow polls the Cloudflare API on a cron and opens a GitHub issue if
+# the latest deployment failed.
+#
+# IMPORTANT — the Cloudflare Pages project is NOT connected yet. Connecting
+# it is a manual Felix step, out of scope for this epic. Until the secrets
+# below exist this workflow is a deliberate clean SUCCESS no-op: it detects
+# the missing config, logs why, and exits 0 (never red).
+#
+# To ACTIVATE the real check, add these in the repo
+# (Settings -> Secrets and variables -> Actions):
+#   Secrets:
+#     CLOUDFLARE_API_TOKEN   - API token with the "Cloudflare Pages: Read"
+#                              permission for the account below.
+#     CLOUDFLARE_ACCOUNT_ID  - the Cloudflare account ID owning the project.
+#   Variables:
+#     CLOUDFLARE_PAGES_PROJECT - the Pages project name (e.g. "cognix-docs").
+# Once all three are present the workflow queries the latest deployment and
+# opens/updates an issue on a failed Cloudflare Pages build.
+
+on:
+  schedule:
+    # Every 6 hours — catches a bad deploy well within a working day.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+# gh issue create/comment needs issues:write. Nothing else writes.
+permissions:
+  contents: read
+  issues: write
+
+# Never let two health runs race on issue creation.
+concurrency:
+  group: deploy-health
+  cancel-in-progress: false
+
+jobs:
+  deploy-health:
+    runs-on: ubuntu-latest
+
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+
+    steps:
+      - name: Check Cloudflare configuration
+        id: config
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PAGES_PROJECT" ]; then
+            echo 'Cloudflare not yet configured — skipping.'
+            echo 'Add CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (secrets) and'
+            echo 'CLOUDFLARE_PAGES_PROJECT (variable) to activate this check.'
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Query latest Cloudflare Pages deployment
+        id: deploy
+        if: steps.config.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CLOUDFLARE_PAGES_PROJECT}/deployments?per_page=1"
+          resp="$(curl -sf -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$api")"
+
+          ok="$(echo "$resp" | jq -r '.success')"
+          if [ "$ok" != "true" ]; then
+            echo "Cloudflare API error:" >&2
+            echo "$resp" | jq -r '.errors' >&2
+            exit 1
+          fi
+
+          stage="$(echo "$resp" | jq -r '.result[0].latest_stage.status // "unknown"')"
+          deploy_id="$(echo "$resp" | jq -r '.result[0].id // "unknown"')"
+          deploy_url="$(echo "$resp" | jq -r '.result[0].url // "unknown"')"
+          echo "Latest deployment $deploy_id stage status: $stage"
+
+          {
+            echo "stage=$stage"
+            echo "deploy_id=$deploy_id"
+            echo "deploy_url=$deploy_url"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compose failure report
+        id: report
+        if: steps.config.outputs.configured == 'true' && steps.deploy.outputs.stage == 'failure'
+        run: |
+          mkdir -p ./report
+          cat > ./report/out.md <<EOF
+          The latest Cloudflare Pages deployment for project \`${CLOUDFLARE_PAGES_PROJECT}\` **failed**.
+
+          - Deployment ID: \`${{ steps.deploy.outputs.deploy_id }}\`
+          - Deployment URL: ${{ steps.deploy.outputs.deploy_url }}
+
+          Check the build log in the Cloudflare dashboard:
+          Workers & Pages -> ${CLOUDFLARE_PAGES_PROJECT} -> Deployments.
+
+          _Opened automatically by the \`deploy-health\` workflow._
+          EOF
+
+      - name: Open / update failed-deploy issue
+        if: steps.config.outputs.configured == 'true' && steps.deploy.outputs.stage == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          MARKER_LABEL='deploy-health'
+          ISSUE_TITLE='Cloudflare Pages deployment failed'
+
+          # Ensure labels exist (idempotent — ignore "already exists").
+          gh label create "$MARKER_LABEL" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color B60205 \
+            --description 'Deploy-health: a Cloudflare Pages deploy failed' \
+            2>/dev/null || true
+          gh label create automated \
+            --repo "$GITHUB_REPOSITORY" \
+            --color ededed \
+            --description 'Opened automatically by a workflow' \
+            2>/dev/null || true
+
+          # Duplicate guard: peter-evans/create-issue-from-file does NOT dedup
+          # by label — it only updates an issue given an explicit issue-number.
+          # So resolve any open issue carrying the marker label ourselves and
+          # comment on it; only open a fresh issue when none exists. This is
+          # the same correct dedup pattern ingest-watchdog.yml uses.
+          existing="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label "$MARKER_LABEL" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            echo "Open failed-deploy issue #$existing already exists — updating it."
+            gh issue comment "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file ./report/out.md
+          else
+            echo "No open failed-deploy issue — opening one."
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$ISSUE_TITLE" \
+              --label "$MARKER_LABEL" \
+              --label automated \
+              --body-file ./report/out.md
+          fi
+
+      - name: Report healthy deploy
+        if: steps.config.outputs.configured == 'true' && steps.deploy.outputs.stage != 'failure'
+        run: |
+          echo "Latest Cloudflare Pages deployment is healthy (stage: ${{ steps.deploy.outputs.stage }})."
