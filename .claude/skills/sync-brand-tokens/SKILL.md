@@ -1,6 +1,6 @@
 ---
 name: sync-brand-tokens
-description: Use when the upstream Cognix brand changed and cognix-docs's Starlight `--sl-color-*` theme needs re-syncing — hand-syncs the vendored brand subset (palette + Inter / JetBrains Mono) into the Starlight theme CSS via Starlight's own `--sl-color-*` theming surface. Not for forking or redesigning the Starlight theme (themed-not-forked — Starlight stays upgradeable), and not for the cognix-web marketing site's Tailwind-v4 `tokens.css` (different repo, different transform).
+description: Use when the upstream Cognix brand changed and cognix-docs's Starlight `--sl-color-*` theme needs re-syncing — hand-syncs the vendored brand subset (palette + Inter / JetBrains Mono) into the Starlight theme CSS via Starlight's own `--sl-color-*` theming surface. A lightweight on-demand maintenance task — no pipeline ceremony. Not for forking or redesigning the Starlight theme (themed-not-forked — Starlight stays upgradeable), and not for the cognix-web marketing site's Tailwind-v4 `tokens.css` (different repo, different transform).
 ---
 
 # Sync Brand Tokens — docs variant

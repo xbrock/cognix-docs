@@ -48,6 +48,10 @@ decision, not a maintenance task.
    `concepts/`, `desktop-app/`, `configuration/`, `integrations/`, `guides/`,
    `reference/api/`, `contributing/` — and `reference/cli/`, which is
    off-limits per the HARD-GATE). If the section is ambiguous, ask Felix.
+   (To be explicit: the IA has **9 sections** (+ Home) — the list above names
+   only 8 hand-editable ones because `reference/cli/` is deliberately excluded
+   here, being a do-not-hand-edit generated subtree, while `reference/api/` and
+   `reference/cli/` share the one `reference/` parent.)
 
 2. **Create the page file** in that section directory under
    `src/content/docs/<section>/`. Name it kebab-case; the filename (minus
