@@ -2,3 +2,8 @@ dist/
 .astro/
 node_modules/
 package-lock.json
+
+# Generated content — dumb file-drop from the cli-docs ingest (per thread C
+# `7b330fd0`). The dumb-file-drop contract requires zero post-processing of
+# ingested content, including Prettier formatting.
+src/content/docs/reference/cli/
