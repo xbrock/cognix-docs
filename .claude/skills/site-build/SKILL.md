@@ -81,8 +81,8 @@ build does not have.
 ```
 docs/site-build-roadmap.md             # the live state doc (this skill maintains it)
 .claude/skills/site-build/SKILL.md      # this skill
-.claude/skills/add-docs-page/           # maintenance skill — scaffold a new docs page (authored by GTM-S10 — part of this GTM skill layer; not present yet)
-.claude/skills/sync-brand-tokens/       # maintenance skill — brand-token sync (authored by GTM-S10 — part of this GTM skill layer; not present yet)
+.claude/skills/add-docs-page/           # maintenance skill — scaffold a new docs page (part of this GTM skill layer)
+.claude/skills/sync-brand-tokens/       # maintenance skill — brand-token sync (part of this GTM skill layer)
 ```
 
 `docs/site-build-roadmap.md` is the durable state. Everything flows from it.
