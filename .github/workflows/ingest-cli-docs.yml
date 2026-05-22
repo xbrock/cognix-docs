@@ -1,0 +1,169 @@
+name: Ingest CLI docs
+
+# Approach-C credential-free docs-pull (GTM Web Foundation, thread A).
+#
+# The cognix Core repo *emits* a `cli-docs` asset on each release; this docs
+# site *ingests* it. Reading public GitHub Releases needs no credentials, so
+# this workflow never holds a cross-repo token — the producing repo is granted
+# no write access here. The only token used is the built-in GITHUB_TOKEN, and
+# only to commit the ingested result back into this repo.
+#
+# The CLI reference comes ONLY from the cognix Core repo (cognix-dev/cognix) —
+# not cognix-desktop. The CLI surface is Core-only, so just that repo is polled.
+#
+# tools/docsgen emits Starlight-ready markdown, so the ingest is a DUMB
+# FILE-DROP — the asset is dropped verbatim into the reference/cli/ content
+# directory with NO post-processing.
+#
+# If the producing repo does not exist yet, has no releases, has nothing newer
+# than the recorded state, or the release carries no `cli-docs` asset, the run
+# is a clean no-op that still exits success. A missing producing side is
+# expected: the cognix-repo tools/docsgen side ships separately and must never
+# turn this workflow red.
+
+on:
+  schedule:
+    # Hourly poll — the credential-free v1 baseline.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+# Default GITHUB_TOKEN is read-only; the commit-back step needs write.
+permissions:
+  contents: write
+
+# Never let two ingest runs race on a commit-back to main.
+concurrency:
+  group: ingest-cli-docs
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+
+    env:
+      # Recorded-state file: holds the last-ingested release tag per repo.
+      STATE_FILE: .github/ingest-state/cli-docs-last-release.json
+      # Directory the Starlight CLI-reference section reads as page content.
+      CONTENT_DIR: src/content/docs/reference/cli
+      # The cognix Core repo — the only source of the CLI reference.
+      SOURCE_REPO: cognix-dev/cognix
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ingest newer cli-docs release
+        env:
+          # Used ONLY for the commit-back to this repo. The release READ below
+          # is unauthenticated (public API) — it does not consume this token.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          changed=0
+          tmp_state="$(mktemp)"
+          cp "$STATE_FILE" "$tmp_state"
+
+          echo "::group::$SOURCE_REPO"
+
+          # --- Credential-free read of the public Releases API ---
+          # No Authorization header. -s -w captures the HTTP status so a
+          # missing repo (404) or empty release set is handled, not fatal.
+          body_file="$(mktemp)"
+          status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${SOURCE_REPO}/releases/latest" || echo 000)"
+
+          if [ "$status" != "200" ]; then
+            # 404 = repo or releases do not exist yet; anything else = transient.
+            # Either way: expected during GTM bring-up — skip, do not fail.
+            echo "No usable latest release (HTTP $status) — skipping $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_tag="$(jq -r '.tag_name // empty' "$body_file")"
+          if [ -z "$latest_tag" ]; then
+            echo "Release has no tag_name — skipping $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          recorded_tag="$(jq -r --arg r "$SOURCE_REPO" \
+            '.repos[$r].last_release_tag // empty' "$tmp_state")"
+
+          if [ "$latest_tag" = "$recorded_tag" ]; then
+            echo "Already at $latest_tag — nothing to ingest for $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Find the `cli-docs` asset on this release. docsgen emits a tarball
+          # of Starlight-ready markdown; accept the common asset names.
+          asset_url="$(jq -r '
+            .assets[]?
+            | select(.name == "cli-docs" or .name == "cli-docs.tar.gz"
+                     or .name == "cli-docs.tgz" or .name == "cli-docs.zip")
+            | .browser_download_url' "$body_file" | head -n1)"
+
+          if [ -z "$asset_url" ]; then
+            echo "Release $latest_tag has no cli-docs asset — skipping $SOURCE_REPO."
+            echo "::endgroup::"
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          asset_name="${asset_url##*/}"
+          echo "Ingesting $SOURCE_REPO cli-docs asset ($asset_name) from $latest_tag."
+
+          # --- Dumb file-drop, NO post-processing ---
+          # docsgen emits Starlight-ready markdown; the ingest only unpacks the
+          # asset and drops the files verbatim into CONTENT_DIR. Replace the
+          # whole subtree so removed CLI pages do not linger.
+          work="$(mktemp -d)"
+          curl -sSL --fail -o "${work}/${asset_name}" "$asset_url"
+
+          rm -rf "$CONTENT_DIR"
+          mkdir -p "$CONTENT_DIR"
+          case "$asset_name" in
+            *.zip)
+              unzip -q "${work}/${asset_name}" -d "$CONTENT_DIR"
+              ;;
+            *)
+              # Bare `cli-docs` or *.tar.gz / *.tgz are treated as a tarball.
+              tar -xzf "${work}/${asset_name}" -C "$CONTENT_DIR"
+              ;;
+          esac
+
+          # Update recorded state for this repo.
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq --arg r "$SOURCE_REPO" --arg t "$latest_tag" --arg n "$now" \
+            '.repos[$r].last_release_tag = $t
+             | .repos[$r].last_ingested_at = $n' \
+            "$tmp_state" > "${tmp_state}.next"
+          mv "${tmp_state}.next" "$tmp_state"
+          cp "$tmp_state" "$STATE_FILE"
+          changed=1
+          echo "::endgroup::"
+
+          # Expose result to the commit step.
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+        id: ingest
+
+      - name: Commit ingested cli-docs
+        if: steps.ingest.outputs.changed == '1'
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$STATE_FILE" "$CONTENT_DIR"
+          if git diff --cached --quiet; then
+            echo "No staged changes — nothing to commit."
+            exit 0
+          fi
+          git commit -m 'chore(cli-docs): ingest newer release CLI reference'
+          git push
