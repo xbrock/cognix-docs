@@ -27,8 +27,9 @@ before dispatching, before editing anything.
    If it shows uncommitted edits, surface that to Felix before any status
    change (a prior run may have been interrupted mid-update).
 3. **Evidence cross-check** — run § Evidence cross-check and build the drift note.
-4. **Show the dashboard** — present § The fixed workflow step 3 before asking
-   anything else or dispatching.
+4. **Show the dashboard** — present the dashboard — item 3 of
+   § The fixed workflow (every site-build run) — before asking anything else or
+   dispatching.
 
 ## Hard rules
 
@@ -80,8 +81,8 @@ build does not have.
 ```
 docs/site-build-roadmap.md             # the live state doc (this skill maintains it)
 .claude/skills/site-build/SKILL.md      # this skill
-.claude/skills/add-docs-page/           # maintenance skill — scaffold a new docs page (authored by this GTM skill layer)
-.claude/skills/sync-brand-tokens/       # maintenance skill — brand-token sync (authored by this GTM skill layer)
+.claude/skills/add-docs-page/           # maintenance skill — scaffold a new docs page (authored by GTM-S10 — part of this GTM skill layer; not present yet)
+.claude/skills/sync-brand-tokens/       # maintenance skill — brand-token sync (authored by GTM-S10 — part of this GTM skill layer; not present yet)
 ```
 
 `docs/site-build-roadmap.md` is the durable state. Everything flows from it.
@@ -163,6 +164,12 @@ workflow existence only; the durable state is `docs/site-build-roadmap.md`.
 | 4. Guides + API reference | `guides/` has 2–3 seeded guide pages and `reference/api/` has a hand-written API overview page.                                                                                          |
 | 5. site-health automation | the PR-gate CI + scheduled site-health workflow files exist under `.github/workflows/`.                                                                                                  |
 | 6. launch-ready           | steps 1–5 all `done` and the roadmap's launch gate is checked.                                                                                                                           |
+
+**Step 5 has no hard upstream dependency.** "Verify & tune site-health
+automation" carries no `Depends on` line in `docs/site-build-roadmap.md` — it
+becomes reachable as steps 1–4 progress (there is a real site to verify against)
+rather than blocking on any single prior step. Only "launch-ready" (step 6)
+gates on all prior steps.
 
 **Crash recovery.** A step left `in_progress` whose artifacts are absent (the
 dispatch crashed mid-step) is flagged in the drift note and re-offered as the
