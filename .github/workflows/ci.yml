@@ -44,8 +44,9 @@ jobs:
         with:
           # Scope the crawl to the built static site and only fail on broken
           # internal/relative links — external URLs are excluded so the gate
-          # stays deterministic and offline-safe.
-          args: --offline --no-progress --include-fragments './dist/**/*.html'
+          # stays deterministic and offline-safe. --root-dir resolves
+          # root-relative links (Starlight emits href="/...") against dist.
+          args: --offline --no-progress --include-fragments --root-dir "${{ github.workspace }}/dist" './dist/**/*.html'
           fail: true
 
       - name: Lint workflow files
